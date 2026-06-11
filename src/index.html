@@ -1,0 +1,700 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cuphead: Pro Edition - Alta Definición</title>
+    <style>
+        body {
+            margin: 0;
+            background-color: #111;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            color: white;
+            font-family: 'Courier New', Courier, monospace;
+            overflow: hidden;
+            user-select: none;
+        }
+        canvas {
+            background-color: #4a3b32; 
+            border: 6px solid #d35400;
+            box-shadow: 0 0 30px rgba(0,0,0,0.9);
+            /* Asegura que el tamaño visual en la pantalla se mantenga fijo */
+            width: 900px;
+            height: 450px;
+            /* Evita el suavizado borroso del navegador */
+            image-rendering: -moz-crisp-edges;
+            image-rendering: -webkit-crisp-edges;
+            image-rendering: pixelated;
+            image-rendering: crisp-edges;
+        }
+    </style>
+</head>
+<body>
+
+    <canvas id="gameCanvas"></canvas>
+
+<script>
+const canvas = document.getElementById("gameCanvas");
+const ctx = canvas.getContext("2d");
+
+// --- CONFIGURACIÓN DE ALTA DENSIDAD (ANTI-BLUR) ---
+const ANCHO_LOGICO = 900;
+const ALTO_LOGICO = 450;
+
+function ajustarResolucionHD() {
+    const dpr = window.devicePixelRatio || 1;
+    // Escalamos el tamaño interno del buffer del canvas
+    canvas.width = ANCHO_LOGICO * dpr;
+    canvas.height = ALTO_LOGICO * dpr;
+    
+    // Escalamos todas las operaciones de dibujo para que el código no cambie
+    ctx.scale(dpr, dpr);
+    
+    // Desactivamos filtros de suavizado en el contexto de dibujo
+    ctx.imageSmoothingEnabled = false;
+    ctx.mozImageSmoothingEnabled = false;
+    ctx.webkitImageSmoothingEnabled = false;
+    ctx.msImageSmoothingEnabled = false;
+}
+ajustarResolucionHD();
+
+// --- ESTADOS DEL JUEGO ---
+let estadoJuego = "MENU"; 
+let nivelActual = 1;
+const nivelMaximo = 3;
+let juegoPausado = false;
+
+// --- MOTOR DE AUDIO RETRO ---
+const AudioCtx = window.AudioContext || window.webkitAudioContext;
+let audioCtx = null;
+
+function iniciarAudio() {
+    if (!audioCtx) audioCtx = new AudioCtx();
+}
+
+function reproducirSonido(tipo) {
+    iniciarAudio();
+    if (!audioCtx) return;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.connect(gain); gain.connect(audioCtx.destination);
+    const tiempo = audioCtx.currentTime;
+
+    if (tipo === 'disparo1') {
+        osc.type = 'triangle'; osc.frequency.setValueAtTime(600, tiempo);
+        osc.frequency.exponentialRampToValueAtTime(150, tiempo + 0.1);
+        gain.gain.setValueAtTime(0.15, tiempo); gain.gain.exponentialRampToValueAtTime(0.01, tiempo + 0.1);
+        osc.start(tiempo); osc.stop(tiempo + 0.1);
+    } 
+    else if (tipo === 'disparo2') {
+        osc.type = 'sawtooth'; osc.frequency.setValueAtTime(250, tiempo);
+        osc.frequency.linearRampToValueAtTime(80, tiempo + 0.15);
+        gain.gain.setValueAtTime(0.2, tiempo); gain.gain.exponentialRampToValueAtTime(0.01, tiempo + 0.15);
+        osc.start(tiempo); osc.stop(tiempo + 0.15);
+    }
+    else if (tipo === 'impactoJefe') {
+        osc.type = 'square'; osc.frequency.setValueAtTime(120, tiempo);
+        osc.frequency.linearRampToValueAtTime(40, tiempo + 0.05);
+        gain.gain.setValueAtTime(0.1, tiempo); gain.gain.exponentialRampToValueAtTime(0.01, tiempo + 0.05);
+        osc.start(tiempo); osc.stop(tiempo + 0.05);
+    }
+    else if (tipo === 'explosionEnemigo') {
+        osc.type = 'sawtooth'; osc.frequency.setValueAtTime(180, tiempo);
+        osc.frequency.exponentialRampToValueAtTime(30, tiempo + 0.2);
+        gain.gain.setValueAtTime(0.3, tiempo); gain.gain.exponentialRampToValueAtTime(0.01, tiempo + 0.2);
+        osc.start(tiempo); osc.stop(tiempo + 0.2);
+    }
+    else if (tipo === 'dañoJugador') {
+        osc.type = 'sawtooth'; osc.frequency.setValueAtTime(150, tiempo);
+        osc.frequency.linearRampToValueAtTime(300, tiempo + 0.1);
+        osc.frequency.linearRampToValueAtTime(100, tiempo + 0.3);
+        gain.gain.setValueAtTime(0.4, tiempo); gain.gain.exponentialRampToValueAtTime(0.01, tiempo + 0.3);
+        osc.start(tiempo); osc.stop(tiempo + 0.3);
+    }
+    else if (tipo === 'clickMenu') {
+        osc.type = 'sine'; osc.frequency.setValueAtTime(400, tiempo);
+        osc.frequency.setValueAtTime(600, tiempo + 0.08);
+        gain.gain.setValueAtTime(0.2, tiempo); gain.gain.exponentialRampToValueAtTime(0.01, tiempo + 0.15);
+        osc.start(tiempo); osc.stop(tiempo + 0.15);
+    }
+}
+
+// --- ENTIDADES ---
+const jugador = {
+    x: 80, y: 320, ancho: 45, alto: 75, altoOriginal: 75, velocidad: 5,
+    saltando: false, agachado: false, velocidadY: 0, gravedad: 0.6, fuerzaSalto: -13,
+    vidaMax: 3, vida: 3, invencible: false, tiempoInvencible: 0,
+    haciendoDash: false, cooldownDash: false, tiempoDashFin: 0, tiempoDashCooldown: 0,
+    direccionDash: 1, armaActual: 1 
+};
+
+const jefe = {
+    x: 680, y: 110, ancho: 160, alto: 300, vidaMax: 80, vida: 80,
+    nombre: "KING BLOCK", color: "#2c3e50", fase: 1, direccionY: 1, velocidadY: 3,
+    ultimoAtaque: 0, cadenciaAtaque: 1400 
+};
+
+const balas = []; const balasJefe = []; const enemigos = [];
+const particulas = []; 
+let flashDisparo = { x: 0, y: 0, activo: false, temporizador: 0 }; 
+
+let puntuacion = 0; let juegoTerminado = false; let victoriaTotal = false;
+let mostrandoTransicion = false; let frames = 0; let ultimoDisparo = 0;
+let temporizadorEnemigos; let mousePresionado = false;
+
+// --- CONFIGURACIÓN DE BOTONES DEL MENÚ ---
+const botonesMenu = [
+    { id: 1, texto: "NIVEL 1: KING BLOCK", x: 250, y: 220, ancho: 400, alto: 45 },
+    { id: 2, texto: "NIVEL 2: CAPTAIN SLIME", x: 250, y: 280, ancho: 400, alto: 45 },
+    { id: 3, texto: "NIVEL 3: NEON PHANTOM", x: 250, y: 340, ancho: 400, alto: 45 }
+];
+
+// --- GENERADOR DE EFECTOS VISUALES ---
+function crearExplosionParticulas(x, y, color, cantidad = 12) {
+    for (let i = 0; i < cantidad; i++) {
+        particulas.push({
+            x: x,
+            y: y,
+            radio: Math.random() * (6 - 3) + 3,
+            vX: (Math.random() - 0.5) * 8, 
+            vY: (Math.random() - 0.7) * 8, 
+            color: color,
+            alpha: 1,
+            desgaste: Math.random() * 0.03 + 0.02 
+        });
+    }
+}
+
+function cargarNivel(nivel) {
+    balas.length = 0; balasJefe.length = 0; enemigos.length = 0; particulas.length = 0;
+    jugador.x = 80; jugador.agachado = false; jugador.alto = jugador.altoOriginal; jugador.y = 320;
+    jugador.vida = jugador.vidaMax; jefe.fase = 1; jefe.y = 110;
+
+    if (nivel === 1) {
+        jefe.nombre = "KING BLOCK"; jefe.color = "#2c3e50";
+        jefe.vidaMax = 80; jefe.vida = 80; jefe.cadenciaAtaque = 1400; jefe.velocidadY = 3; jefe.ancho = 160; jefe.alto = 300;
+    } else if (nivel === 2) {
+        jefe.nombre = "CAPTAIN SLIME"; jefe.color = "#27ae60"; 
+        jefe.vidaMax = 100; jefe.vida = 100; jefe.cadenciaAtaque = 1200; jefe.velocidadY = 4; jefe.ancho = 180; jefe.alto = 180;
+    } else if (nivel === 3) {
+        jefe.nombre = "NEON PHANTOM"; jefe.color = "#8e44ad"; 
+        jefe.vidaMax = 120; jefe.vida = 120; jefe.cadenciaAtaque = 900; jefe.velocidadY = 6; jefe.ancho = 160; jefe.alto = 240;
+    }
+}
+
+// --- CONTROLES Y EVENTOS ---
+const teclas = {};
+window.addEventListener("keydown", (e) => {
+    teclas[e.code] = true;
+    iniciarAudio();
+
+    if (estadoJuego === "JUGANDO") {
+        if (e.code === "KeyP" || e.code === "Escape") {
+            if (!juegoTerminado && !victoriaTotal && !mostrandoTransicion) juegoPausado = !juegoPausado;
+        }
+        if (e.code === "KeyF" && !juegoTerminado && !victoriaTotal && !mostrandoTransicion && !juegoPausado) {
+            jugador.armaActual = jugador.armaActual === 1 ? 2 : 1;
+        }
+        if ((e.code === "ShiftLeft" || e.code === "ShiftRight") && !jugador.haciendoDash && !jugador.cooldownDash && !juegoTerminado && !victoriaTotal && !juegoPausado && !jugador.agachado) {
+            jugador.haciendoDash = true; jugador.invencible = true;
+            jugador.tiempoDashFin = Date.now() + 200; jugador.tiempoInvencible = Date.now() + 200;
+            if (teclas["ArrowLeft"] || teclas["KeyA"]) jugador.direccionDash = -1;
+            else jugador.direccionDash = 1;
+            crearExplosionParticulas(jugador.x + jugador.ancho/2, jugador.y + jugador.alto - 10, "#ffffff", 8); 
+        }
+    }
+    if (e.code === "KeyR") {
+        clearTimeout(temporizadorEnemigos);
+        estadoJuego = "MENU";
+        juegoTerminado = false; victoriaTotal = false; juegoPausado = false; mostrandoTransicion = false;
+    }
+});
+
+window.addEventListener("keyup", (e) => teclas[e.code] = false);
+
+window.addEventListener("mousedown", (e) => { 
+    iniciarAudio();
+    if (e.button !== 0) return;
+
+    if (estadoJuego === "MENU") {
+        const rectCanvas = canvas.getBoundingClientRect();
+        const mouseX = e.clientX - rectCanvas.left;
+        const mouseY = e.clientY - rectCanvas.top;
+
+        botonesMenu.forEach(b => {
+            if (mouseX >= b.x && mouseX <= b.x + b.ancho && mouseY >= b.y && mouseY <= b.y + b.alto) {
+                reproducirSonido('clickMenu');
+                nivelActual = b.id; puntuacion = 0; juegoTerminado = false; victoriaTotal = false; juegoPausado = false;
+                cargarNivel(nivelActual);
+                estadoJuego = "JUGANDO";
+                canvas.style.cursor = "crosshair";
+                clearTimeout(temporizadorEnemigos);
+                spawnEnemigo();
+            }
+        });
+    } else {
+        mousePresionado = true;
+    }
+});
+
+window.addEventListener("mouseup", (e) => { if (e.button === 0) mousePresionado = false; });
+
+function avanzarNivel() {
+    if (nivelActual < nivelMaximo) {
+        mostrandoTransicion = true;
+        nivelActual++;
+        clearTimeout(temporizadorEnemigos);
+        setTimeout(() => {
+            mostrandoTransicion = false;
+            cargarNivel(nivelActual);
+            spawnEnemigo();
+        }, 2500); 
+    } else {
+        victoriaTotal = true;
+    }
+}
+
+// --- SISTEMA DE DISPARO ---
+function disparar() {
+    const tiempoActual = Date.now();
+    let cadencia = jugador.armaActual === 1 ? 120 : 250; 
+
+    if (tiempoActual - ultimoDisparo > cadencia) {
+        let apuntaArriba = teclas["ArrowUp"] || teclas["KeyW"];
+        let alturaDisparoY = jugador.agachado ? jugador.y + 15 : jugador.y + 22;
+        
+        flashDisparo.x = apuntaArriba ? jugador.x + jugador.ancho / 2 : jugador.x + jugador.ancho + 5;
+        flashDisparo.y = apuntaArriba ? jugador.y - 10 : alturaDisparoY + 5;
+        flashDisparo.activo = true;
+        flashDisparo.temporizador = 3; 
+
+        if (jugador.armaActual === 1) {
+            reproducirSonido('disparo1');
+            balas.push({
+                tipo: 1, x: apuntaArriba ? jugador.x + jugador.ancho / 2 - 8 : jugador.x + jugador.ancho,
+                y: apuntaArriba ? jugador.y - 15 : alturaDisparoY,
+                ancho: apuntaArriba ? 14 : 24, alto: apuntaArriba ? 24 : 14,
+                vX: apuntaArriba ? 0 : 13, vY: apuntaArriba ? -13 : 0, color: "#00edff", rango: 999 
+            });
+        } else {
+            reproducirSonido('disparo2');
+            let rangoEscopeta = 480; 
+            if (apuntaArriba) {
+                balas.push({ tipo: 2, x: jugador.x + jugador.ancho/2 - 8, y: jugador.y, ancho: 16, alto: 16, vX: 0, vY: -11, color: "#f1c40f", rango: rangoEscopeta });
+                balas.push({ tipo: 2, x: jugador.x + jugador.ancho/2 - 8, y: jugador.y, ancho: 16, alto: 16, vX: -4, vY: -10, color: "#f1c40f", rango: rangoEscopeta });
+                balas.push({ tipo: 2, x: jugador.x + jugador.ancho/2 - 8, y: jugador.y, ancho: 16, alto: 16, vX: 4, vY: -10, color: "#f1c40f", rango: rangoEscopeta });
+            } else {
+                balas.push({ tipo: 2, x: jugador.x + jugador.ancho, y: alturaDisparoY, ancho: 16, alto: 16, vX: 11, vY: 0, color: "#f1c40f", rango: rangoEscopeta });
+                balas.push({ tipo: 2, x: jugador.x + jugador.ancho, y: alturaDisparoY, ancho: 16, alto: 16, vX: 10, vY: -4, color: "#f1c40f", rango: rangoEscopeta });
+                balas.push({ tipo: 2, x: jugador.x + jugador.ancho, y: alturaDisparoY, ancho: 16, alto: 16, vX: 10, vY: 4, color: "#f1c40f", rango: rangoEscopeta });
+            }
+        }
+        ultimoDisparo = tiempoActual;
+    }
+}
+
+// --- ATAQUES Y ENEMIGOS ---
+function ataqueJefe() {
+    if (juegoTerminado || victoriaTotal || mostrandoTransicion || juegoPausado || estadoJuego !== "JUGANDO") return;
+    const tiempoActual = Date.now();
+
+    if (tiempoActual - jefe.ultimoAtaque > jefe.cadenciaAtaque) {
+        if (nivelActual === 1) {
+            if (jefe.fase === 1) {
+                balasJefe.push({ x: jefe.x, y: jefe.y + 120, ancho: 24, alto: 24, vX: -6, vY: 0, gravedadY: 0, color: "#e67e22" });
+            } else {
+                balasJefe.push({ x: jefe.x, y: jefe.y + 60, ancho: 24, alto: 24, vX: -9, vY: 0, gravedadY: 0, color: "#e74c3c" });
+                balasJefe.push({ x: jefe.x, y: jefe.y + 200, ancho: 24, alto: 24, vX: -9, vY: 0, gravedadY: 0, color: "#e74c3c" });
+            }
+        } 
+        else if (nivelActual === 2) {
+            if (jefe.fase === 1) {
+                balasJefe.push({ x: jefe.x + 40, y: jefe.y + 40, ancho: 26, alto: 26, vX: -5, vY: -6, gravedadY: 0.25, color: "#2ecc71" });
+            } else {
+                balasJefe.push({ x: jefe.x + 40, y: jefe.y + 40, ancho: 26, alto: 26, vX: -7, vY: -8, gravedadY: 0.3, color: "#27ae60" });
+                balasJefe.push({ x: jefe.x, y: jefe.y + 60, ancho: 26, alto: 26, vX: -5, vY: -7, gravedadY: 0.25, color: "#1abc9c" });
+            }
+        } 
+        else if (nivelActual === 3) {
+            if (jefe.fase === 1) {
+                balasJefe.push({ x: jefe.x, y: jefe.y + 120, ancho: 22, alto: 22, vX: -8, vY: -2, gravedadY: 0, color: "#9b59b6" });
+                balasJefe.push({ x: jefe.x, y: jefe.y + 120, ancho: 22, alto: 22, vX: -8, vY: 2, gravedadY: 0, color: "#9b59b6" });
+            } else {
+                balasJefe.push({ x: jefe.x, y: jefe.y + 100, ancho: 22, alto: 22, vX: -11, vY: 0, gravedadY: 0, color: "#ff4757" });
+                balasJefe.push({ x: jefe.x, y: jefe.y + 140, ancho: 22, alto: 22, vX: -10, vY: -4, gravedadY: 0, color: "#ff4757" });
+                balasJefe.push({ x: jefe.x, y: jefe.y + 140, ancho: 22, alto: 22, vX: -10, vY: 4, gravedadY: 0, color: "#ff4757" });
+            }
+        }
+        jefe.ultimoAtaque = tiempoActual;
+    }
+}
+
+function spawnEnemigo() {
+    if (juegoTerminado || victoriaTotal || mostrandoTransicion || juegoPausado || estadoJuego !== "JUGANDO") {
+        temporizadorEnemigos = setTimeout(spawnEnemigo, 1000);
+        return;
+    }
+    const esVolador = Math.random() > 0.5;
+    const tamaño = Math.random() * (60 - 45) + 45; 
+    
+    if (esVolador) {
+        enemigos.push({
+            tipo: "volador", x: jefe.x - 30, y: Math.random() * (180 - 50) + 50,
+            ancho: tamaño, alto: tamaño, velocidad: Math.random() * (4 - 2) + 2, faseAnimacion: Math.random() * 100
+        });
+    } else {
+        enemigos.push({
+            tipo: "terrestre", x: jefe.x - 30, y: ANCHO_LOGICO - tamaño - 40,
+            ancho: tamaño, alto: tamaño, velocidad: Math.random() * (5 - 3) + 3, faseAnimacion: Math.random() * 100
+        });
+    }
+    temporizadorEnemigos = setTimeout(spawnEnemigo, jefe.fase === 1 ? 2300 : 1300);
+}
+
+function detectarColision(rect1, rect2) {
+    return rect1.x < rect2.x + rect2.ancho && rect1.x + rect1.ancho > rect2.x && rect1.y < rect2.y + rect2.alto && rect1.y + rect1.alto > rect2.y;
+}
+
+// --- ACTUALIZACIÓN ---
+function actualizar() {
+    if (estadoJuego === "MENU") { canvas.style.cursor = "default"; return; }
+    if (juegoTerminado || victoriaTotal || mostrandoTransicion || juegoPausado) return;
+    frames++;
+
+    if (flashDisparo.activo) {
+        flashDisparo.temporizador--;
+        if (flashDisparo.temporizador <= 0) flashDisparo.activo = false;
+    }
+
+    // Actualizar Partículas
+    for (let i = particulas.length - 1; i >= 0; i--) {
+        particulas[i].x += particulas[i].vX;
+        particulas[i].vY += 0.2; 
+        particulas[i].y += particulas[i].vY;
+        particulas[i].alpha -= particulas[i].desgaste; 
+
+        if (particulas[i].alpha <= 0) particulas.splice(i, 1);
+    }
+
+    // Agacharse
+    if ((teclas["ArrowDown"] || teclas["KeyS"]) && !jugador.saltando) {
+        if (!jugador.agachado) {
+            jugador.agachado = true; jugador.alto = jugador.altoOriginal / 1.6;
+            jugador.y += (jugador.altoOriginal - jugador.alto);
+        }
+    } else {
+        if (jugador.agachado) {
+            jugador.y -= (jugador.altoOriginal - jugador.alto); jugador.agachado = false; jugador.alto = jugador.altoOriginal;
+        }
+    }
+
+    if (jugador.haciendoDash && Date.now() > jugador.tiempoDashFin) {
+        jugador.haciendoDash = false; jugador.cooldownDash = true; jugador.tiempoDashCooldown = Date.now() + 400;
+    }
+    if (jugador.cooldownDash && Date.now() > jugador.tiempoDashCooldown) jugador.cooldownDash = false;
+    if (jugador.invencible && Date.now() > jugador.tiempoInvencible && !jugador.haciendoDash) jugador.invencible = false;
+
+    if (jugador.haciendoDash) {
+        jugador.x += 14 * jugador.direccionDash;
+        if (frames % 2 === 0) crearExplosionParticulas(jugador.x, jugador.y + jugador.alto - 15, "rgba(255,255,255,0.4)", 2);
+    } else {
+        if (!jugador.agachado) {
+            if (teclas["ArrowLeft"] || teclas["KeyA"]) jugador.x -= jugador.velocidad;
+            if (teclas["ArrowRight"] || teclas["KeyD"]) jugador.x += jugador.velocidad;
+        }
+    }
+
+    if ((teclas["Space"] || teclas["KeyK"]) && !jugador.saltando && !jugador.haciendoDash && !jugador.agachado) {
+        jugador.velocidadY = jugador.fuerzaSalto; jugador.saltando = true;
+        crearExplosionParticulas(jugador.x + jugador.ancho/2, jugador.y + jugador.alto, "#cbd5e1", 6); 
+    }
+
+    if (!jugador.haciendoDash) { jugador.velocidadY += jugador.gravedad; jugador.y += jugador.velocidadY; }
+
+    const suelo = ALTO_LOGICO - jugador.alto - 40;
+    if (jugador.y > suelo) { jugador.y = suelo; jugador.velocidadY = 0; jugador.saltando = false; }
+    if (jugador.x < 0) jugador.x = 0;
+    if (jugador.x + jugador.ancho > jefe.x) jugador.x = jefe.x - jugador.ancho;
+
+    if (mousePresionado) disparar();
+    ataqueJefe();
+
+    // Jefes movimiento
+    if (nivelActual === 1 && jefe.fase === 2) {
+        jefe.y += jefe.velocidadY * jefe.direccionY;
+        if (jefe.y < 40 || jefe.y + jefe.alto > ALTO_LOGICO - 45) jefe.direccionY *= -1;
+    } else if (nivelActual === 2) {
+        jefe.y += jefe.velocidadY * jefe.direccionY;
+        if (jefe.y < 50 || jefe.y + jefe.alto > ALTO_LOGICO - 45) jefe.direccionY *= -1;
+    } else if (nivelActual === 3) {
+        jefe.y += Math.sin(frames * 0.05) * 4;
+        if (jefe.fase === 2 && frames % 150 === 0) jefe.y = Math.random() * (ALTO_LOGICO - jefe.alto - 60) + 30;
+    }
+
+    // Balas Jugador
+    for (let i = balas.length - 1; i >= 0; i--) {
+        balas[i].x += balas[i].vX; balas[i].y += balas[i].vY;
+        if (balas[i].rango !== 999) balas[i].rango -= Math.sqrt(balas[i].vX * balas[i].vX + balas[i].vY * balas[i].vY);
+
+        if (detectarColision(balas[i], jefe)) {
+            jefe.vida -= balas[i].tipo === 1 ? 1 : 1.1; 
+            crearExplosionParticulas(balas[i].x, balas[i].y, balas[i].color, 5); 
+            balas.splice(i, 1); puntuacion += 5;
+            reproducirSonido('impactoJefe');
+
+            if (jefe.vida <= jefe.vidaMax / 2 && jefe.fase === 1) {
+                jefe.fase = 2;
+                crearExplosionParticulas(jefe.x + jefe.ancho/2, jefe.y + jefe.alto/2, "#ff4757", 35); 
+                if (nivelActual === 1) jefe.color = "#c0392b";
+                if (nivelActual === 2) jefe.color = "#16a085"; 
+                if (nivelActual === 3) jefe.color = "#d91b5c"; 
+                jefe.cadenciaAtaque *= 0.6; 
+            }
+            if (jefe.vida <= 0) {
+                crearExplosionParticulas(jefe.x + jefe.ancho/2, jefe.y + jefe.alto/2, "#f1c40f", 60);
+                avanzarNivel();
+            }
+            continue;
+        }
+        if (balas[i] && (balas[i].x > ANCHO_LOGICO || balas[i].y < 0 || balas[i].rango <= 0)) balas.splice(i, 1);
+    }
+
+    // Balas Jefe
+    for (let i = balasJefe.length - 1; i >= 0; i--) {
+        balasJefe[i].x += balasJefe[i].vX;
+        if (balasJefe[i].gravedadY) balasJefe[i].vY += balasJefe[i].gravedadY; 
+        balasJefe[i].y += balasJefe[i].vY;
+
+        if (detectarColision(balasJefe[i], jugador) && !jugador.invencible) {
+            jugador.vida--; jugador.invencible = true; jugador.tiempoInvencible = Date.now() + 1000;
+            crearExplosionParticulas(jugador.x + jugador.ancho/2, jugador.y + jugador.alto/2, "#ff0000", 20); 
+            balasJefe.splice(i, 1); reproducirSonido('dañoJugador');
+            if (jugador.vida <= 0) juegoTerminado = true;
+            continue;
+        }
+        if (balasJefe[i] && (balasJefe[i].x < 0 || balasJefe[i].y > ALTO_LOGICO)) balasJefe.splice(i, 1);
+    }
+
+    // Enemigos
+    for (let i = enemigos.length - 1; i >= 0; i--) {
+        enemigos[i].x -= enemigos[i].velocidad;
+        if (enemigos[i].tipo === "volador") enemigos[i].y += Math.sin((frames + enemigos[i].faseAnimacion) * 0.08) * 3;
+
+        if (detectarColision(jugador, enemigos[i]) && !jugador.invencible) {
+            jugador.vida--; jugador.invencible = true; jugador.tiempoInvencible = Date.now() + 1000;
+            crearExplosionParticulas(jugador.x + jugador.ancho/2, jugador.y + jugador.alto/2, "#ff0000", 20);
+            reproducirSonido('dañoJugador');
+            if (jugador.vida <= 0) juegoTerminado = true;
+        }
+
+        for (let j = balas.length - 1; j >= 0; j--) {
+            if (detectarColision(balas[j], enemigos[i])) {
+                let colorExplosion = enemigos[i].tipo === "volador" ? "#2ecc71" : "#9b59b6";
+                crearExplosionParticulas(enemigos[i].x + enemigos[i].ancho/2, enemigos[i].y + enemigos[i].alto/2, colorExplosion, 20); 
+                enemigos.splice(i, 1); balas.splice(j, 1); puntuacion += 10;
+                reproducirSonido('explosionEnemigo'); break;
+            }
+        }
+        if (enemigos[i] && enemigos[i].x + enemigos[i].ancho < 0) enemigos.splice(i, 1);
+    }
+}
+
+// --- RENDERS DE GRÁFICOS ---
+function dibujarJugador() {
+    if (jugador.invencible && !jugador.haciendoDash && Math.floor(frames / 4) % 2 === 0) return;
+    const x = jugador.x; const y = jugador.y;
+    let estirarX = jugador.haciendoDash ? 15 : 0;
+    let offsetAgachadoY = jugador.agachado ? 20 : 0;
+
+    ctx.fillStyle = jugador.haciendoDash ? "#fff" : "#fbc531"; 
+    ctx.fillRect(x + 2 - estirarX, y + (jugador.agachado ? 30 : 60), 18 + estirarX, jugador.agachado ? 16 : 15); 
+    ctx.fillRect(x + 22, y + (jugador.agachado ? 30 : 60), 18 + estirarX, jugador.agachado ? 16 : 15);
+    if(!jugador.agachado) { ctx.fillStyle = "#000"; ctx.fillRect(x + 8, y + 50, 5, 10); ctx.fillRect(x + 28, y + 50, 5, 10); }
+    ctx.fillStyle = "#e84118"; ctx.fillRect(x - estirarX, y + (jugador.agachado ? 10 : 30), 42 + estirarX * 2, jugador.agachado ? 24 : 22);
+    ctx.fillStyle = jugador.armaActual === 1 ? "#00edff" : "#f1c40f";
+    if (mousePresionado) ctx.fillRect(x + 38, y + (jugador.agachado ? 15 : 22), 10, 10);
+    ctx.fillStyle = "#2f3640"; ctx.fillRect(x + 6, y + (jugador.agachado ? 2 : 15), 30, 15);
+    ctx.fillStyle = "#f5f6fa"; ctx.strokeStyle = "#000"; ctx.lineWidth = 2;
+    ctx.fillRect(x + 4, y - (jugador.agachado ? 16 : 5), 34, 22); ctx.strokeRect(x + 4, y - (jugador.agachado ? 16 : 5), 34, 22);
+    let apuntaArriba = teclas["ArrowUp"] || teclas["KeyW"];
+    ctx.fillStyle = "#fff"; ctx.fillRect(x + 18, y - offsetAgachadoY, 10, 14); ctx.fillRect(x + 28, y - offsetAgachadoY, 10, 14);
+    ctx.fillStyle = "#000"; ctx.fillRect(x + 24, apuntaArriba ? y - offsetAgachadoY : y + 3 - offsetAgachadoY, 4, 8); ctx.fillRect(x + 34, apuntaArriba ? y - offsetAgachadoY : y + 3 - offsetAgachadoY, 4, 8);
+
+    if (flashDisparo.activo) {
+        ctx.fillStyle = "#fff"; ctx.beginPath();
+        ctx.arc(flashDisparo.x, flashDisparo.y, 14, 0, Math.PI * 2); ctx.fill();
+    }
+}
+
+function dibujarJefe() {
+    ctx.save();
+    let centroX = jefe.x + jefe.ancho / 2; let centroY = jefe.y + jefe.alto / 2;
+
+    if (nivelActual === 1) {
+        let respiracion = Math.sin(frames * 0.1) * 5;
+        ctx.fillStyle = jefe.color; ctx.strokeStyle = "#111"; ctx.lineWidth = 5;
+        ctx.fillRect(jefe.x, jefe.y - respiracion, jefe.ancho, jefe.alto + respiracion);
+        ctx.strokeRect(jefe.x, jefe.y - respiracion, jefe.ancho, jefe.alto + respiracion);
+        ctx.fillStyle = "#f1c40f"; ctx.beginPath();
+        ctx.moveTo(jefe.x + 20, jefe.y - respiracion); ctx.lineTo(jefe.x + 40, jefe.y - 25 - respiracion);
+        ctx.lineTo(jefe.x + 80, jefe.y - respiracion); ctx.lineTo(jefe.x + 120, jefe.y - 25 - respiracion);
+        ctx.lineTo(jefe.x + 140, jefe.y - respiracion); ctx.closePath(); ctx.fill();
+        ctx.fillStyle = "#fff"; ctx.fillRect(jefe.x + 25, jefe.y + 40 - respiracion, 40, 45); ctx.fillRect(jefe.x + 95, jefe.y + 40 - respiracion, 40, 45);
+        ctx.fillStyle = "#c0392b"; ctx.fillRect(jefe.x + 35, jefe.y + 50 - respiracion, 15, 20); ctx.fillRect(jefe.x + 105, jefe.y + 50 - respiracion, 15, 20);
+        ctx.fillStyle = "#111"; ctx.fillRect(jefe.x + 30, jefe.y + 115 - respiracion, 100, 35);
+        ctx.fillStyle = "#fff";
+        for(let i = 0; i < 5; i++) { ctx.fillRect(jefe.x + 38 + (i * 18), jefe.y + 115 - respiracion, 10, 10); ctx.fillRect(jefe.x + 38 + (i * 18), jefe.y + 140 - respiracion, 10, 10); }
+    } 
+    else if (nivelActual === 2) {
+        let deformacionY = Math.sin(frames * 0.15) * 8;
+        let radioX = jefe.ancho / 2; let radioY = (jefe.alto / 2) + deformacionY;
+        ctx.strokeStyle = "#111"; ctx.lineWidth = 6; ctx.fillStyle = jefe.color;
+        ctx.beginPath(); ctx.ellipse(centroX, centroY, radioX, radioY, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        ctx.fillStyle = "rgba(255, 255, 255, 0.25)"; ctx.beginPath(); ctx.ellipse(centroX - 35, centroY - 35, 25, 12, Math.PI / -4, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(centroX, centroY - 10, 35, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        ctx.fillStyle = jefe.fase === 1 ? "#d35400" : "#c0392b"; ctx.beginPath(); ctx.arc(centroX - 8, centroY - 5, 14, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = "#000"; ctx.beginPath(); ctx.arc(centroX - 8, centroY - 5, 6, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = "#111"; ctx.lineWidth = 6; ctx.beginPath(); ctx.moveTo(centroX - 40, centroY - 40); ctx.lineTo(centroX + 30, centroY - 25); ctx.stroke();
+        ctx.fillStyle = "#1e272e"; ctx.beginPath(); ctx.arc(centroX, centroY + 40, 25, 0, Math.PI, false); ctx.fill();
+    } 
+    else if (nivelActual === 3) {
+        ctx.shadowBlur = 25; ctx.shadowColor = jefe.fase === 1 ? "#be2edd" : "#ff4757";
+        ctx.fillStyle = jefe.color; ctx.strokeStyle = "#fff"; ctx.lineWidth = 4;
+        ctx.beginPath(); ctx.moveTo(centroX - jefe.ancho / 2, jefe.y); ctx.lineTo(centroX + jefe.ancho / 2, jefe.y); ctx.lineTo(centroX, jefe.y + jefe.alto); ctx.closePath(); ctx.fill(); ctx.stroke();
+        ctx.shadowBlur = 0;
+        let pulsoNucleo = Math.abs(Math.sin(frames * 0.2)) * 12 + 8;
+        ctx.fillStyle = "#ffffff"; ctx.beginPath(); ctx.arc(centroX, centroY + 10, pulsoNucleo, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 8;
+        ctx.beginPath(); ctx.moveTo(centroX - 45, jefe.y + 60); ctx.lineTo(centroX - 15, jefe.y + 75); ctx.moveTo(centroX + 45, jefe.y + 60); ctx.lineTo(centroX + 15, jefe.y + 75); ctx.stroke(); 
+    }
+    ctx.restore();
+}
+
+function dibujarHUD() {
+    ctx.fillStyle = "#f5f6fa"; ctx.font = "bold 18px 'Courier New'"; ctx.fillText(`SCORE: ${puntuacion}`, 25, 35);
+    ctx.fillText(`NIVEL: ${nivelActual}/${nivelMaximo}`, 25, 60);
+    ctx.font = "12px 'Courier New'"; ctx.fillStyle = jugador.armaActual === 1 ? "#00edff" : "#f1c40f";
+    ctx.fillText(`ARMA: ${jugador.armaActual === 1 ? "Peashooter (Click)" : "Spread (Click)"}` , 25, 80);
+    ctx.font = "18px 'Courier New'"; ctx.fillStyle = "#fff"; ctx.fillText("HP: ", 25, 110);
+    for (let i = 0; i < jugador.vidaMax; i++) {
+        ctx.fillStyle = (i < jugador.vida) ? "#e84118" : "#7f8c8d"; ctx.fillRect(60 + (i * 22), 96, 14, 14);
+    }
+    ctx.fillStyle = "rgba(0,0,0,0.5)"; ctx.fillRect(250, 20, 400, 20);
+    let porcentajeVidaJefe = jefe.vida / jefe.vidaMax;
+    ctx.fillStyle = jefe.fase === 1 ? "#f1c40f" : "#e74c3c"; ctx.fillRect(250, 20, 400 * porcentajeVidaJefe, 20);
+    ctx.strokeStyle = "#fff"; ctx.strokeRect(250, 20, 400, 20);
+    ctx.fillStyle = "#fff"; ctx.font = "bold 13px 'Courier New'"; ctx.fillText(`${jefe.nombre} ${jefe.fase === 2 ? '(¡FURIOSO!)' : ''}`, 255, 15);
+}
+
+function dibujarMenuPrincipal() {
+    ctx.fillStyle = "#2c1f18"; ctx.fillRect(0, 0, ANCHO_LOGICO, ALTO_LOGICO);
+    ctx.strokeStyle = "rgba(211, 84, 0, 0.15)"; ctx.lineWidth = 2;
+    for (let i = 0; i < ANCHO_LOGICO; i += 40) { ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, ALTO_LOGICO); ctx.stroke(); }
+    ctx.fillStyle = "#f1c40f"; ctx.font = "bold 52px Impact"; ctx.textAlign = "center";
+    ctx.shadowBlur = 15; ctx.shadowColor = "#d35400"; ctx.fillText("CUPHEAD: BLOCK EDITION", ANCHO_LOGICO / 2, 90); ctx.shadowBlur = 0;
+    ctx.fillStyle = "#fff"; ctx.font = "bold 16px 'Courier New'"; ctx.fillText("SELECCIONA TU BATALLA CON EL RATÓN:", ANCHO_LOGICO / 2, 160);
+
+    botonesMenu.forEach(b => {
+        ctx.fillStyle = "#e67e22"; ctx.strokeStyle = "#fff"; ctx.lineWidth = 3;
+        ctx.fillRect(b.x, b.y, b.ancho, b.alto); ctx.strokeRect(b.x, b.y, b.ancho, b.alto);
+        ctx.fillStyle = "#fff"; ctx.font = "bold 16px 'Courier New'"; ctx.fillText(b.texto, b.x + b.ancho / 2, b.y + 28);
+    });
+
+    ctx.fillStyle = "#bdc3c7"; ctx.font = "12px 'Courier New'";
+    ctx.fillText("Controles: WASD/Flechas - Mover | Espacio - Saltar | Click Izq - Disparar | Shift - Dash | F - Cambiar Arma | R - Menú", ANCHO_LOGICO / 2, 420);
+    ctx.textAlign = "left";
+}
+
+function dibujar() {
+    if (estadoJuego === "MENU") { dibujarMenuPrincipal(); return; }
+
+    let gradient = ctx.createLinearGradient(0, 0, 0, ALTO_LOGICO);
+    if (nivelActual === 1) { gradient.addColorStop(0, "#2c1f18"); gradient.addColorStop(1, "#4a3b32"); }
+    else if (nivelActual === 2) { gradient.addColorStop(0, "#192a1e"); gradient.addColorStop(1, "#273c2c"); }
+    else { gradient.addColorStop(0, "#231326"); gradient.addColorStop(1, "#361d3b"); }
+    ctx.fillStyle = gradient; ctx.fillRect(0, 0, ANCHO_LOGICO, ALTO_LOGICO);
+    ctx.fillStyle = "#1e272e"; ctx.fillRect(0, ALTO_LOGICO - 40, ANCHO_LOGICO, 40);
+
+    balas.forEach(b => {
+        ctx.save();
+        if (b.tipo === 1) {
+            ctx.fillStyle = b.color; ctx.beginPath(); ctx.ellipse(b.x + b.ancho/2, b.y + b.alto/2, b.ancho/2, b.alto/2, 0, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.ellipse(b.x + b.ancho/2, b.y + b.alto/2, b.ancho/4, b.alto/4, 0, 0, Math.PI * 2); ctx.fill();
+        } else {
+            ctx.fillStyle = b.color; ctx.beginPath(); ctx.moveTo(b.x + b.ancho/2, b.y); ctx.lineTo(b.x + b.ancho, b.y + b.alto/2); ctx.lineTo(b.x + b.ancho/2, b.y + b.alto); ctx.lineTo(b.x, b.y + b.alto/2); ctx.closePath(); ctx.fill();
+        }
+        ctx.restore();
+    });
+
+    balasJefe.forEach(bj => {
+        ctx.fillStyle = bj.color; ctx.beginPath(); ctx.arc(bj.x + bj.ancho/2, bj.y + bj.alto/2, bj.ancho/2, 0, Math.PI*2); ctx.fill();
+        ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(bj.x + bj.ancho/2, bj.y + bj.alto/2, bj.ancho/4, 0, Math.PI*2); ctx.fill();
+    });
+
+    enemigos.forEach(e => { ctx.fillStyle = e.tipo === "volador" ? "#2ecc71" : "#9b59b6"; ctx.fillRect(e.x, e.y, e.ancho, e.alto); });
+
+    dibujarJugador();
+    dibujarJefe();
+
+    particulas.forEach(p => {
+        ctx.save();
+        ctx.globalAlpha = p.alpha;
+        ctx.fillStyle = p.color;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.radio, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+    });
+
+    dibujarHUD();
+
+    if (juegoPausado) {
+        ctx.fillStyle = "rgba(0, 0, 0, 0.6)"; ctx.fillRect(0, 0, ANCHO_LOGICO, ALTO_LOGICO);
+        ctx.fillStyle = "#f1c40f"; ctx.font = "bold 50px 'Courier New'"; ctx.textAlign = "center";
+        ctx.fillText("PAUSA", ANCHO_LOGICO / 2, ALTO_LOGICO / 2);
+        ctx.fillStyle = "#fff"; ctx.font = "16px 'Courier New'";
+        ctx.fillText("Presiona 'P' o 'ESC' para reanudar", ANCHO_LOGICO / 2, ALTO_LOGICO / 2 + 40);
+        ctx.fillText("Presiona 'R' para volver al Menú Principal", ANCHO_LOGICO / 2, ALTO_LOGICO / 2 + 70);
+        ctx.textAlign = "left";
+    }
+
+    if (mostrandoTransicion) {
+        ctx.fillStyle = "#111"; ctx.fillRect(0, 0, ANCHO_LOGICO, ALTO_LOGICO);
+        ctx.fillStyle = "#f1c40f"; ctx.font = "50px Impact"; ctx.textAlign = "center";
+        ctx.fillText("¡KNOCKOUT!", ANCHO_LOGICO / 2, ALTO_LOGICO / 2 - 20);
+        ctx.fillStyle = "#fff"; ctx.font = "20px 'Courier New'"; ctx.fillText(`Preparando Nivel ${nivelActual}...`, ANCHO_LOGICO / 2, ALTO_LOGICO / 2 + 40);
+        ctx.textAlign = "left";
+    }
+
+    if (juegoTerminado) {
+        ctx.fillStyle = "rgba(0, 0, 0, 0.9)"; ctx.fillRect(0, 0, ANCHO_LOGICO, ALTO_LOGICO);
+        ctx.fillStyle = "#e74c3c"; ctx.font = "60px Impact"; ctx.textAlign = "center";
+        ctx.fillText("YOU DIED", ANCHO_LOGICO / 2, ALTO_LOGICO / 2);
+        ctx.fillStyle = "#fff"; ctx.font = "20px 'Courier New'"; ctx.fillText("Presiona 'R' para salir al Menú Principal", ANCHO_LOGICO / 2, ALTO_LOGICO / 2 + 50);
+        ctx.textAlign = "left";
+    }
+
+    if (victoriaTotal) {
+        ctx.fillStyle = "rgba(0, 0, 0, 0.95)"; ctx.fillRect(0, 0, ANCHO_LOGICO, ALTO_LOGICO);
+        ctx.fillStyle = "#f1c40f"; ctx.font = "70px Impact"; ctx.textAlign = "center";
+        ctx.fillText("¡CAMPAÑA COMPLETADA!", ANCHO_LOGICO / 2, ALTO_LOGICO / 2 - 20);
+        ctx.fillStyle = "#2ecc71"; ctx.font = "25px 'Courier New'"; ctx.fillText(`Final Score: ${puntuacion}`, ANCHO_LOGICO / 2, ALTO_LOGICO / 2 + 40);
+        ctx.fillStyle = "#fff"; ctx.font = "16px 'Courier New'"; ctx.fillText("Presiona 'R' para ir al Menú Principal", ANCHO_LOGICO / 2, ALTO_LOGICO / 2 + 80);
+        ctx.textAlign = "left";
+    }
+}
+
+function loop() {
+    actualizar();
+    dibujar();
+    requestAnimationFrame(loop);
+}
+
+loop();
+</script>
+
+</body>
+</html>
